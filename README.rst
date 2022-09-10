@@ -243,6 +243,21 @@ Examples
   pgb1     | postgres | INSERT    | 17154 |         13 |          0 |          0 |           0 |            0 |           0 |     41394.959959
  (5 rows)
 
+Dashboard examples
+------------------
+
+General database statistics.
+
+.. image:: doc/grafana1.png
+
+.. image:: doc/grafana2.png
+
+.. image:: doc/grafana3.png
+
+Detailed statistics.
+
+.. image:: doc/grafana4.png
+
 
 Compatibility
 -------------
