@@ -273,18 +273,18 @@ static void pgsc_shmem_startup(void);
 static void pgsc_shmem_shutdown(int code, Datum arg);
 static void pgsc_ExecutorStart(QueryDesc *queryDesc, int eflags);
 /* pgsc_ProcessUtility */
-#if (PG_VERSION_NUM >= 140000)
+#if PG_VERSION_NUM >= 140000
 static void pgsc_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
                                 bool readOnlyTree,
                                 ProcessUtilityContext context, ParamListInfo params,
                                 QueryEnvironment *queryEnv,
                                 DestReceiver *dest, QueryCompletion *qc);
-#elif (PG_VERSION_NUM >= 130000)
+#elif PG_VERSION_NUM >= 130000
 static void pgsc_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
                                 ProcessUtilityContext context, ParamListInfo params,
                                 QueryEnvironment *queryEnv,
                                 DestReceiver *dest, QueryCompletion *qc);
-#elif (PG_VERSION_NUM >= 100000)
+#elif PG_VERSION_NUM >= 100000
 static void pgsc_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
                                 ProcessUtilityContext context, ParamListInfo params,
                                 QueryEnvironment *queryEnv,
@@ -295,11 +295,11 @@ static void pgsc_ProcessUtility(Node *parsetree, const char *queryString,
                                 DestReceiver *dest, char *completionTag);
 #endif
 /* pgsc_ExecutorRun */
-#if (PG_VERSION_NUM >= 100000)
+#if PG_VERSION_NUM >= 100000
 static void pgsc_ExecutorRun(QueryDesc *queryDesc,
                              ScanDirection direction,
                              uint64 count, bool execute_once);
-#elif (PG_VERSION_NUM >= 90600)
+#elif PG_VERSION_NUM >= 90600
 static void pgsc_ExecutorRun(QueryDesc *queryDesc,
                              ScanDirection direction,
                              uint64 count);
@@ -313,10 +313,10 @@ static void pgsc_ExecutorEnd(QueryDesc *queryDesc);
 
 
 static bool pgsc_assign_linux_hz_check_hook(int *newval, void **extra, GucSource source);
-#if (PG_VERSION_NUM < 130000)
+#if PG_VERSION_NUM < 130000
 static void BufferUsageAccumDiff(BufferUsage* bufusage, BufferUsage* pgBufferUsage, BufferUsage* bufusage_start);
 #endif
-#if (PG_VERSION_NUM < 90600)
+#if PG_VERSION_NUM < 90600
 static uint32 pgsc_hash_fn(const void *key, Size keysize);
 static int pgsc_match_fn(const void *key1, const void *key2, Size keysize);
 #endif
@@ -327,7 +327,7 @@ static void entry_reset(void);
 static void aggstats_reset(void);
 static void pgsc_store(CmdType operation, double total_time, uint64 rows,
                        SysInfo *sys_info, const BufferUsage *bufusage
-#if (PG_VERSION_NUM >= 130000)
+#if PG_VERSION_NUM >= 130000
                        ,const WalUsage *walusage
 #endif
 );
@@ -421,7 +421,7 @@ void _PG_init(void)
 	 * resources in pgsc_shmem_startup().
 	 */
 	RequestAddinShmemSpace(pgsc_memsize());
-#if (PG_VERSION_NUM >= 90600)
+#if PG_VERSION_NUM >= 90600
 	RequestNamedLWLockTranche("pg_stat_counters", 1);
 #else
 	RequestAddinLWLocks(1);
@@ -491,7 +491,7 @@ pgsc_shmem_startup(void)
 	if (!found)
 	{
 		/* First time through ... */
-#if (PG_VERSION_NUM >= 90600)
+#if PG_VERSION_NUM >= 90600
 		pgsc->lock = &(GetNamedLWLockTranche("pg_stat_counters"))->lock;
 #else
 		pgsc->lock = LWLockAssign();
@@ -513,7 +513,7 @@ pgsc_shmem_startup(void)
 	memset(&info, 0, sizeof(info));
 	info.keysize = sizeof(pgscHashKey);
 	info.entrysize = sizeof(pgscEntry);
-#if (PG_VERSION_NUM < 90600)
+#if PG_VERSION_NUM < 90600
 	info.hash = pgsc_hash_fn;
 	info.match = pgsc_match_fn;
 
@@ -685,7 +685,7 @@ pgsc_shmem_shutdown(int code, Datum arg)
 		goto error;
 	}
 
-#if (PG_VERSION_NUM >= 90407)
+#if PG_VERSION_NUM >= 90407
 	/* 
 	 * Rename file into place, so we atomically replace any old one. 
 	 */
@@ -740,7 +740,7 @@ pgsc_ExecutorStart(QueryDesc *queryDesc, int eflags)
 			MemoryContext oldcxt;
 
 			oldcxt = MemoryContextSwitchTo(queryDesc->estate->es_query_cxt);
-#if (PG_VERSION_NUM >= 140000)
+#if PG_VERSION_NUM >= 140000
 			queryDesc->totaltime = InstrAlloc(1, INSTRUMENT_ALL, false);
 #else
 			queryDesc->totaltime = InstrAlloc(1, INSTRUMENT_ALL);
@@ -754,11 +754,11 @@ pgsc_ExecutorStart(QueryDesc *queryDesc, int eflags)
 /*
  * ExecutorRun hook: all we need do is track nesting depth
  */
-#if (PG_VERSION_NUM >= 100000)
+#if PG_VERSION_NUM >= 100000
 static void
 pgsc_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count,
                  bool execute_once)
-#elif (PG_VERSION_NUM >= 90600)
+#elif PG_VERSION_NUM >= 90600
 static void
 pgsc_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count)
 #else
@@ -769,7 +769,7 @@ pgsc_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, long count)
 	nested_level++;
 	PG_TRY();
 	{
-#if (PG_VERSION_NUM >= 100000)
+#if PG_VERSION_NUM >= 100000
 		if (prev_ExecutorRun)
 			prev_ExecutorRun(queryDesc, direction, count, execute_once);
 		else
@@ -863,7 +863,7 @@ pgsc_ExecutorEnd(QueryDesc *queryDesc)
 		           queryDesc->estate->es_processed,
 		           &sys_info,
 		           &queryDesc->totaltime->bufusage
-#if (PG_VERSION_NUM >= 130000)
+#if PG_VERSION_NUM >= 130000
 		           , &queryDesc->totaltime->walusage
 #endif
 		);
@@ -879,20 +879,20 @@ pgsc_ExecutorEnd(QueryDesc *queryDesc)
  * ProcessUtility hook
  */
 
-#if (PG_VERSION_NUM >= 140000)
+#if PG_VERSION_NUM >= 140000
 static void
 pgsc_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
                     bool readOnlyTree,
                     ProcessUtilityContext context,
                     ParamListInfo params, QueryEnvironment *queryEnv,
                     DestReceiver *dest, QueryCompletion *qc)
-#elif (PG_VERSION_NUM >= 130000)
+#elif PG_VERSION_NUM >= 130000
 static void
 pgsc_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
                     ProcessUtilityContext context,
                     ParamListInfo params, QueryEnvironment *queryEnv,
                     DestReceiver *dest, QueryCompletion *qc)
-#elif (PG_VERSION_NUM >= 100000)
+#elif PG_VERSION_NUM >= 100000
 static void
 pgsc_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
                     ProcessUtilityContext context,
@@ -905,7 +905,7 @@ pgsc_ProcessUtility(Node *parsetree, const char *queryString,
                     DestReceiver *dest, char *completionTag)
 #endif
 {
-#if (PG_VERSION_NUM >= 100000)
+#if PG_VERSION_NUM >= 100000
 	Node *parsetree = pstmt->utilityStmt;
 #endif
 	/*
@@ -932,13 +932,13 @@ pgsc_ProcessUtility(Node *parsetree, const char *queryString,
 		uint64 rows;
 		BufferUsage bufusage_start,
 		            bufusage;
-#if (PG_VERSION_NUM >= 130000)
+#if PG_VERSION_NUM >= 130000
 		WalUsage walusage_start,
 		         walusage;
 #endif
 
 		bufusage_start = pgBufferUsage;
-#if (PG_VERSION_NUM >= 130000)
+#if PG_VERSION_NUM >= 130000
 		walusage_start = pgWalUsage;
 #endif
 
@@ -947,7 +947,7 @@ pgsc_ProcessUtility(Node *parsetree, const char *queryString,
 		nested_level++;
 		PG_TRY();
 		{
-#if (PG_VERSION_NUM >= 140000)
+#if PG_VERSION_NUM >= 140000
 			if (prev_ProcessUtility)
 				prev_ProcessUtility(pstmt, queryString, readOnlyTree,
 				                    context, params, queryEnv,
@@ -956,7 +956,7 @@ pgsc_ProcessUtility(Node *parsetree, const char *queryString,
 				standard_ProcessUtility(pstmt, queryString, readOnlyTree,
 				                        context, params, queryEnv,
 				                        dest, qc);
-#elif (PG_VERSION_NUM >= 130000)
+#elif PG_VERSION_NUM >= 130000
 			if (prev_ProcessUtility)
 				prev_ProcessUtility(pstmt, queryString,
 				                    context, params, queryEnv,
@@ -965,7 +965,7 @@ pgsc_ProcessUtility(Node *parsetree, const char *queryString,
 				standard_ProcessUtility(pstmt, queryString,
 				                        context, params, queryEnv,
 				                        dest, qc);
-#elif (PG_VERSION_NUM >= 100000)
+#elif PG_VERSION_NUM >= 100000
 			if (prev_ProcessUtility)
 				prev_ProcessUtility(pstmt, queryString,
 				                    context, params, queryEnv,
@@ -996,7 +996,7 @@ pgsc_ProcessUtility(Node *parsetree, const char *queryString,
 		INSTR_TIME_SET_CURRENT(duration);
 		INSTR_TIME_SUBTRACT(duration, start);
 
-#if (PG_VERSION_NUM >= 130000)
+#if PG_VERSION_NUM >= 130000
 		rows = (qc && qc->commandTag == CMDTAG_COPY) ? qc->nprocessed : 0;
 		/* calc differences of WAL counters. */
 		memset(&walusage, 0, sizeof(WalUsage));
@@ -1005,7 +1005,7 @@ pgsc_ProcessUtility(Node *parsetree, const char *queryString,
 		/* parse command tag to retrieve the number of affected rows. */
 		if (completionTag &&
 			strncmp(completionTag, "COPY ", 5) == 0)
-#if (PG_VERSION_NUM >= 90600)
+#if PG_VERSION_NUM >= 90600
 			rows = pg_strtouint64(completionTag + 5, NULL, 10);
 #else
 #ifdef HAVE_STRTOULL
@@ -1027,14 +1027,14 @@ pgsc_ProcessUtility(Node *parsetree, const char *queryString,
 		           rows,
 		           NULL,                              /* sysinfo */
 		           &bufusage
-#if (PG_VERSION_NUM >= 130000)
+#if PG_VERSION_NUM >= 130000
 		           , &walusage
 #endif
 		          );
 	}
 	else
 	{
-#if (PG_VERSION_NUM >= 140000)
+#if PG_VERSION_NUM >= 140000
 		if (prev_ProcessUtility)
 			prev_ProcessUtility(pstmt, queryString, readOnlyTree,
 			                    context, params, queryEnv,
@@ -1043,7 +1043,7 @@ pgsc_ProcessUtility(Node *parsetree, const char *queryString,
 			standard_ProcessUtility(pstmt, queryString, readOnlyTree,
 			                        context, params, queryEnv,
 			                        dest, qc);
-#elif (PG_VERSION_NUM >= 130000)
+#elif PG_VERSION_NUM >= 130000
 		if (prev_ProcessUtility)
 			prev_ProcessUtility(pstmt, queryString,
 			                    context, params, queryEnv,
@@ -1052,7 +1052,7 @@ pgsc_ProcessUtility(Node *parsetree, const char *queryString,
 			standard_ProcessUtility(pstmt, queryString,
 			                        context, params, queryEnv,
 			                        dest, qc);
-#elif (PG_VERSION_NUM >= 100000)
+#elif PG_VERSION_NUM >= 100000
 		if (prev_ProcessUtility)
 			prev_ProcessUtility(pstmt, queryString,
 			                    context, params, queryEnv,
@@ -1121,7 +1121,7 @@ BufferUsageAccumDiff(BufferUsage* bufusage, BufferUsage* pgBufferUsage, BufferUs
 }
 #endif
 
-#if (PG_VERSION_NUM < 90600)
+#if PG_VERSION_NUM < 90600
 /*
  * Calculate hash value for a key
  */
@@ -1314,7 +1314,7 @@ aggstats_reset(void)
  */
 static void
 pgsc_update_counters(volatile Counters *c, double total_time, uint64 rows, SysInfo *sys_info, const BufferUsage *bufusage
-#if (PG_VERSION_NUM >= 130000)
+#if PG_VERSION_NUM >= 130000
                      , const WalUsage *walusage
 #endif
 )
@@ -1349,7 +1349,7 @@ pgsc_update_counters(volatile Counters *c, double total_time, uint64 rows, SysIn
 		c->blk_read_time += INSTR_TIME_GET_MILLISEC(bufusage->blk_read_time);
 		c->blk_write_time += INSTR_TIME_GET_MILLISEC(bufusage->blk_write_time);
 	}
-#if (PG_VERSION_NUM >= 130000)
+#if PG_VERSION_NUM >= 130000
 	if (walusage)
 	{
 		c->wal_records += walusage->wal_records;
@@ -1382,7 +1382,7 @@ pgsc_update_counters(volatile Counters *c, double total_time, uint64 rows, SysIn
  */
 static void
 pgsc_store(CmdType operation, double total_time, uint64 rows, SysInfo *sys_info, const BufferUsage *bufusage
-#if (PG_VERSION_NUM >= 130000)
+#if PG_VERSION_NUM >= 130000
            , const WalUsage *walusage
 #endif
 )
@@ -1430,7 +1430,7 @@ pgsc_store(CmdType operation, double total_time, uint64 rows, SysInfo *sys_info,
 
 			SpinLockAcquire(&e->mutex);
 			pgsc_update_counters(&e->counters, total_time, rows, sys_info, bufusage
-#if (PG_VERSION_NUM >= 130000)
+#if PG_VERSION_NUM >= 130000
 			                     , walusage
 #endif
 			                    );
@@ -1439,7 +1439,7 @@ pgsc_store(CmdType operation, double total_time, uint64 rows, SysInfo *sys_info,
 
 		/* update aggregate statistics */
 		pgsc_update_counters(&a->counters, total_time, rows, sys_info, bufusage
-#if (PG_VERSION_NUM >= 130000)
+#if PG_VERSION_NUM >= 130000
 		                     , walusage
 #endif
 		                    );
@@ -1614,7 +1614,7 @@ pg_stat_counters(PG_FUNCTION_ARGS)
 		values[i++] = Int64GetDatumFast(tmp.temp_blks_written);
 		values[i++] = Float8GetDatumFast(tmp.blk_read_time);
 		values[i++] = Float8GetDatumFast(tmp.blk_write_time);
-#if (PG_VERSION_NUM >= 130000)
+#if PG_VERSION_NUM >= 130000
 		{
 			char            buf[256];
 			Datum           wal_bytes;
@@ -1731,7 +1731,7 @@ pg_stat_counters_all(PG_FUNCTION_ARGS)
 	values[i++] = Int64GetDatumFast(tmp.temp_blks_written);
 	values[i++] = Float8GetDatumFast(tmp.blk_read_time);
 	values[i++] = Float8GetDatumFast(tmp.blk_write_time);
-#if (PG_VERSION_NUM >= 130000)
+#if PG_VERSION_NUM >= 130000
 	{
 		char            buf[256];
 		Datum           wal_bytes;
