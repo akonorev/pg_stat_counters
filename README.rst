@@ -262,7 +262,7 @@ Detailed statistics.
 Compatibility
 -------------
 
-``pg_stat_counters`` is compatible with the PostgreSQL 9.4, 9.5, 9.6, 10, 11, 12, 13 and 14 releases.
+``pg_stat_counters`` is compatible with the PostgreSQL 9.4, 9.5, 9.6, 10, 11, 12, 13, 14 and 15 releases.
 
 Authors
 -------

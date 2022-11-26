@@ -195,6 +195,9 @@ static struct rusage rusage_start;
 static struct rusage rusage_end;
 
 /* Saved hook values in case of unload */
+#if PG_VERSION_NUM >= 150000
+static shmem_request_hook_type prev_shmem_request_hook = NULL;
+#endif
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;
 static ExecutorRun_hook_type prev_ExecutorRun = NULL;
@@ -269,6 +272,9 @@ PG_FUNCTION_INFO_V1(pg_stat_counters);
 PG_FUNCTION_INFO_V1(pg_stat_counters_all);
 PG_FUNCTION_INFO_V1(pg_stat_counters_info);
 
+#if PG_VERSION_NUM >= 150000
+static void pgsc_shmem_request(void);
+#endif
 static void pgsc_shmem_startup(void);
 static void pgsc_shmem_shutdown(int code, Datum arg);
 static void pgsc_ExecutorStart(QueryDesc *queryDesc, int eflags);
@@ -413,21 +419,31 @@ void _PG_init(void)
 	                        NULL,
 	                        NULL);
 
+#if PG_VERSION_NUM >= 150000
+	MarkGUCPrefixReserved("pg_stat_counters");
+#else
 	EmitWarningsOnPlaceholders("pg_stat_counters");
+#endif
 
 	/*
-	 * Request additional shared resources.  (These are no-ops if we're not in
-	 * the postmaster process.)  We'll allocate or attach to the shared
-	 * resources in pgsc_shmem_startup().
+	 * Request additional shared resources. (These are no-ops if we're not in
+	 * the postmaster process.)  PG15 uses a shmem_request hook.
+	 * We'll allocate or attach to the shared resources in pgsc_shmem_startup().
 	 */
+#if PG_VERSION_NUM < 150000
 	RequestAddinShmemSpace(pgsc_memsize());
 #if PG_VERSION_NUM >= 90600
 	RequestNamedLWLockTranche("pg_stat_counters", 1);
 #else
 	RequestAddinLWLocks(1);
 #endif
+#endif /* up to PG15 */
 
 	/* Install hooks. */
+#if PG_VERSION_NUM >= 150000
+	prev_shmem_request_hook = shmem_request_hook;
+	shmem_request_hook = pgsc_shmem_request;
+#endif
 	prev_shmem_startup_hook = shmem_startup_hook;
 	shmem_startup_hook = pgsc_shmem_startup;
 	prev_ExecutorStart = ExecutorStart_hook;
@@ -448,6 +464,9 @@ void _PG_init(void)
 void _PG_fini(void)
 {
 	/* Uninstall hooks. */
+#if PG_VERSION_NUM >= 150000
+	shmem_request_hook = prev_shmem_request_hook;
+#endif
 	shmem_startup_hook = prev_shmem_startup_hook;
 	ExecutorStart_hook = prev_ExecutorStart;
 	ExecutorRun_hook = prev_ExecutorRun;
@@ -455,6 +474,22 @@ void _PG_fini(void)
 	ExecutorEnd_hook = prev_ExecutorEnd;
 	ProcessUtility_hook = prev_ProcessUtility;
 }
+
+/*
+ * shmem_request hook: request additional shared resources. We'll
+ * allocate or attach to the shared resources in pgsc_shmem_startup().
+ */
+#if PG_VERSION_NUM >= 150000
+static void
+pgsc_shmem_request(void)
+{
+	if (prev_shmem_request_hook)
+		prev_shmem_request_hook();
+
+	RequestAddinShmemSpace(pgsc_memsize());
+	RequestNamedLWLockTranche("pg_stat_counters", 1);
+}
+#endif
 
 /*
  * shmem_startup hook: allocate or attach to shared memory,
