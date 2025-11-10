@@ -5,7 +5,7 @@
  *
  * Copyright (c) 2021, Alexey E. Konorev <alexey.konorev@gmail.com>
  *
- * Portions Copyright (c) 2008-2017, PostgreSQL Global Development Group
+ * Portions Copyright (c) 2008-2025, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
  *	  pg_stat_counters/pg_stat_counters.c
@@ -19,8 +19,33 @@
 #include <unistd.h>
 #include <sys/resource.h>
 
+#if PG_VERSION_NUM >= 160000
+#ifndef WIN32
+#define HAVE_GETRUSAGE
+#endif		/* HAVE_GETRUSAGE */
+#endif		/* pg16+ */
+
+#if PG_VERSION_NUM < 160000
+#ifdef HAVE_SYS_RESOURCE_H
+#include <sys/time.h>
+#include <sys/resource.h>
+#endif		/* HAVE_SYS_RESOURCE_H */
+
 #ifndef HAVE_GETRUSAGE
 #include "rusagestub.h"
+#endif		/* !HAVE_GETRUSAGE */
+#endif		/* pg16- */
+
+#if PG_VERSION_NUM >= 160000
+#include "utils/pg_rusage.h"
+#endif
+
+#if PG_VERSION_NUM >= 150000
+#include "jit/jit.h"
+#endif          
+
+#if PG_VERSION_NUM >= 140000
+#include "access/parallel.h"
 #endif
 
 #include "access/hash.h"
@@ -30,6 +55,9 @@
 #include "funcapi.h"
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
+#if PG_VERSION_NUM >= 130000
+#include "optimizer/planner.h"
+#endif
 #include "parser/analyze.h"
 #include "parser/parsetree.h"
 #include "parser/scanner.h"
@@ -48,6 +76,7 @@
 #include <time.h>
 //#include "funcapi.h"
 
+
 PG_MODULE_MAGIC;
 
 /* Location of permanent stats file (valid when database is shut down) */
@@ -61,6 +90,22 @@ static const uint32 PGSC_PG_MAJOR_VERSION = PG_VERSION_NUM / 100;
 
 /* PGSC */
 #define PGSC_DEALLOC_PERCENT       5            /* free this % of entries at once */
+
+typedef enum pgscStoreKind
+{
+        PGSC_INVALID = -1,
+
+        /*
+         * PGSC_PLAN and PGSC_EXEC must be respectively 0 and 1 as they're used to
+         * reference the underlying values in the arrays in the Counters struct,
+         * and this order is required in pg_stat_counters_internal().
+         */
+        PGSC_PLAN = 0,
+        PGSC_EXEC,
+} pgscStoreKind;
+
+#define PGSC_NUMKIND (PGSC_EXEC + 1)
+
 
 /*
  * Hashtable key that defines the identity of a hashtable entry.  We separate
@@ -80,14 +125,15 @@ typedef struct pgscHashKey
 typedef struct Counters
 {
 	/* calls statistics */
-	int64           calls;                  /* # of times executed */
 	int64           calls_1_2s;             /* # of times with execution time 1-2 sec */
 	int64           calls_2_3s;             /* 2-3 sec and so on ... */
 	int64           calls_3_5s;
 	int64           calls_5_10s;
 	int64           calls_10_20s;
 	int64           calls_gt20s;            /* >20 sec */
-	double          total_time;             /* total execution time, in msec */
+        int64           calls[PGSC_NUMKIND];    /* # of times planned/executed */
+	double          total_time[PGSC_NUMKIND];       /* total planning/execution time,
+                                                                           * in msec */
 	int64           rows;                   /* total # of retrieved or affected rows */
 	/* blocks statistics */
 	int64           shared_blks_hit;        /* # of shared buffer hits */
@@ -100,12 +146,57 @@ typedef struct Counters
 	int64           local_blks_written;     /* # of local disk blocks written */
 	int64           temp_blks_read;         /* # of temp blocks read */
 	int64           temp_blks_written;      /* # of temp blocks written */
+//#if (PG_VERSION_NUM >= 170000)
+        double          shared_blk_read_time;   /* time spent reading shared blocks,
+                                                                                 * in msec */
+        double          shared_blk_write_time;  /* time spent writing shared blocks,
+                                                                                 * in msec */
+        double          local_blk_read_time;    /* time spent reading local blocks, in
+                                                                                 * msec */
+        double          local_blk_write_time;   /* time spent writing local blocks, in
+                                                                                 * msec */
+//#else
 	double          blk_read_time;          /* time spent reading, in msec */
 	double          blk_write_time;         /* time spent writing, in msec */
+//#endif
+//#if (PG_VERSION_NUM >= 130000)
+        double          temp_blk_read_time; /* time spent reading temp blocks, in msec */
+        double          temp_blk_write_time;    /* time spent writing temp blocks, in
+                                                                                * msec */
+//#endif
 	/* wal statistics. version 13 and above */
+//#if (PG_VERSION_NUM >= 130000)
 	int64           wal_records;            /* # of WAL records generated */
 	int64           wal_fpi;                /* # of WAL full page images generated */
 	uint64          wal_bytes;              /* total amount of WAL bytes generated */
+//#endif
+//#if (PG_VERSION_NUM >= 180000)
+	int64		wal_buffers_full;	/* # of times the WAL buffers became full */
+//#endif
+	/* jit statistics. version 15 and above */
+//#if (PG_VERSION_NUM >= 150000)
+	int64		jit_functions;		/* total number of JIT functions emitted */
+	double		jit_generation_time;	/* total time to generate jit code */
+	int64		jit_inlining_count;	/* number of times inlining time has been
+						  			* > 0 */
+	double		jit_deform_time;	/* total time to deform tuples in jit code */
+	int64		jit_deform_count;	/* number of times deform time has been
+						 			* > 0 */
+	double		jit_inlining_time;	/* total time to inline jit code */
+	int64		jit_optimization_count;	/* number of times optimization time has been
+						  			* > 0 */
+	double		jit_optimization_time;  /* total time to optimize jit code */
+	int64		jit_emission_count;	/* number of times emission time has been
+						 			* > 0 */
+	double		jit_emission_time;	/* total time to emit jit code */
+//#endif
+	/* version 18 and above */
+//#if (PG_VERSION_NUM >= 180000)
+	int64		parallel_workers_to_launch;	/* # of parallel workers planned
+									* to be launched */
+	int64		parallel_workers_launched;	/* # of parallel workers actually
+							  		* launched */
+//#endif
 	/* system statistics */
 	double          utime;                  /* CPU user time in msec */
 	double          stime;                  /* CPU system time in msec */
@@ -189,13 +280,22 @@ typedef struct SysInfo
 
 /*---- Local variables ----*/
 
+/* Current nesting depth of planner/ExecutorRun/ProcessUtility calls */
+static int      nesting_level = 0;
+
 /* Current nesting depth of ExecutorRun+ProcessUtility calls */
-static int nested_level = 0;
 static struct rusage rusage_start;
 static struct rusage rusage_end;
 
 /* Saved hook values in case of unload */
+#if PG_VERSION_NUM >= 150000
+static shmem_request_hook_type prev_shmem_request_hook = NULL;
+#endif
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
+#if PG_VERSION_NUM >= 130000
+static post_parse_analyze_hook_type prev_post_parse_analyze_hook = NULL;
+static planner_hook_type prev_planner_hook = NULL;
+#endif
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;
 static ExecutorRun_hook_type prev_ExecutorRun = NULL;
 static ExecutorFinish_hook_type prev_ExecutorFinish = NULL;
@@ -225,19 +325,29 @@ static const struct config_enum_entry track_options[] =
 	{NULL, 0, false}
 };
 
-static int    pgsc_max;           /* max # statements to track */
-static int    pgsc_track;         /* tracking level */
-static bool   pgsc_track_utility; /* whether to track utility commands */
-static bool   pgsc_save;          /* whether to save stats across shutdown */
-static int    pgsc_linux_hz;      /* Inform pg_stat_counters of the linux CONFIG_HZ config option,
-                                   * This is used by pg_stat_counters to compensate for sampling
-                                   * errors in getrusage due to the kernel adhering to its ticks.
-                                   * The default value, -1, tries to guess it at startup.
-                                   */
+static int    pgsc_max;            /* max # statements to track */
+static int    pgsc_track;          /* tracking level */
+#if PG_VERSION_NUM >= 130000 
+static bool   pgsc_track_planning; /* whether to track planning duration */
+#endif
+static bool   pgsc_track_utility;  /* whether to track utility commands */
+static bool   pgsc_save;           /* whether to save stats across shutdown */
+static int    pgsc_linux_hz;       /* Inform pg_stat_counters of the linux CONFIG_HZ config option,
+                                    * This is used by pg_stat_counters to compensate for sampling
+                                    * errors in getrusage due to the kernel adhering to its ticks.
+                                    * The default value, -1, tries to guess it at startup.
+                                    */
 
-#define pgsc_enabled() \
+#if PG_VERSION_NUM >= 140000 
+#define pgsc_enabled(level) \
+        (!IsParallelWorker() && \
         (pgsc_track == PGSC_TRACK_ALL || \
-        (pgsc_track == PGSC_TRACK_TOP && nested_level == 0))
+        (pgsc_track == PGSC_TRACK_TOP && (level) == 0)))
+#else
+#define pgsc_enabled(level) \
+        (pgsc_track == PGSC_TRACK_ALL || \
+        (pgsc_track == PGSC_TRACK_TOP && (level) == 0))
+#endif
 
 #define pgsc_reset() \
 	do { \
@@ -268,10 +378,24 @@ PG_FUNCTION_INFO_V1(pg_stat_counters_reset);
 PG_FUNCTION_INFO_V1(pg_stat_counters);
 PG_FUNCTION_INFO_V1(pg_stat_counters_all);
 PG_FUNCTION_INFO_V1(pg_stat_counters_info);
+PG_FUNCTION_INFO_V1(get_cmd_name);
 
+#if PG_VERSION_NUM >= 150000
+static void pgsc_shmem_request(void);
+#endif
 static void pgsc_shmem_startup(void);
 static void pgsc_shmem_shutdown(int code, Datum arg);
+#if PG_VERSION_NUM >= 140000
+static void pgsc_post_parse_analyze(ParseState *pstate,
+		                    Query *query,
+                                    JumbleState *jstate);
+static PlannedStmt *pgsc_planner(Query *parse,
+                                 const char *query_string,
+                                 int cursorOptions,
+                                 ParamListInfo boundParams);
+#endif
 static void pgsc_ExecutorStart(QueryDesc *queryDesc, int eflags);
+
 /* pgsc_ProcessUtility */
 #if (PG_VERSION_NUM >= 140000)
 static void pgsc_ProcessUtility(PlannedStmt *pstmt, const char *queryString,
@@ -295,11 +419,11 @@ static void pgsc_ProcessUtility(Node *parsetree, const char *queryString,
                                 DestReceiver *dest, char *completionTag);
 #endif
 /* pgsc_ExecutorRun */
-#if (PG_VERSION_NUM >= 100000)
+#if (PG_VERSION_NUM >= 100000 && PG_VERSION_NUM < 180000)
 static void pgsc_ExecutorRun(QueryDesc *queryDesc,
                              ScanDirection direction,
                              uint64 count, bool execute_once);
-#elif (PG_VERSION_NUM >= 90600)
+#elif (PG_VERSION_NUM >= 90600 || PG_VERSION_NUM >= 180000 )
 static void pgsc_ExecutorRun(QueryDesc *queryDesc,
                              ScanDirection direction,
                              uint64 count);
@@ -325,10 +449,19 @@ static pgscEntry *entry_alloc(pgscHashKey *key);
 static void entry_dealloc(void);
 static void entry_reset(void);
 static void aggstats_reset(void);
-static void pgsc_store(CmdType operation, double total_time, uint64 rows,
-                       SysInfo *sys_info, const BufferUsage *bufusage
+static void pgsc_store(CmdType operation
+                       , pgscStoreKind kind
+                       , double total_time, uint64 rows
+                       , SysInfo *sys_info, const BufferUsage *bufusage
 #if (PG_VERSION_NUM >= 130000)
-                       ,const WalUsage *walusage
+                       , const WalUsage *walusage
+#endif
+#if (PG_VERSION_NUM >= 150000)
+                       , const struct JitInstrumentation *jitusage
+#endif
+#if (PG_VERSION_NUM >= 180000)
+                       , int parallel_workers_to_launch
+                       , int parallel_workers_launched
 #endif
 );
 
@@ -397,7 +530,18 @@ void _PG_init(void)
 	                         NULL,
 	                         NULL,
 	                         NULL);
-
+#if PG_VERSION_NUM >= 130000
+        DefineCustomBoolVariable("pg_stat_counters.track_planning",
+                                 "Selects whether planning duration is tracked by pg_stat_counters.",
+                                 NULL,
+                                 &pgsc_track_planning,
+                                 false,
+                                 PGC_SUSET,
+                                 0,
+                                 NULL,
+                                 NULL,
+                                 NULL);
+#endif
 	DefineCustomIntVariable("pg_stat_counters.linux_hz",
 	                        "Inform pg_stat_counters of the linux CONFIG_HZ config option",
 	                        "This is used by pg_stat_counters to compensate for sampling errors "
@@ -413,23 +557,39 @@ void _PG_init(void)
 	                        NULL,
 	                        NULL);
 
+#if PG_VERSION_NUM >= 150000
+	MarkGUCPrefixReserved("pg_stat_counters");
+#else
 	EmitWarningsOnPlaceholders("pg_stat_counters");
+#endif
 
 	/*
 	 * Request additional shared resources.  (These are no-ops if we're not in
-	 * the postmaster process.)  We'll allocate or attach to the shared
-	 * resources in pgsc_shmem_startup().
+	 * the postmaster process.) PG15 uses a shmem_request hook.
+	 * We'll allocate or attach to the shared resources in pgsc_shmem_startup().
 	 */
+#if PG_VERSION_NUM < 150000
 	RequestAddinShmemSpace(pgsc_memsize());
 #if (PG_VERSION_NUM >= 90600)
 	RequestNamedLWLockTranche("pg_stat_counters", 1);
 #else
 	RequestAddinLWLocks(1);
 #endif
+#endif /* up to PG15 */
 
 	/* Install hooks. */
+#if PG_VERSION_NUM >= 150000
+	prev_shmem_request_hook = shmem_request_hook;
+	shmem_request_hook = pgsc_shmem_request;
+#endif
 	prev_shmem_startup_hook = shmem_startup_hook;
 	shmem_startup_hook = pgsc_shmem_startup;
+#if PG_VERSION_NUM >= 140000
+        prev_post_parse_analyze_hook = post_parse_analyze_hook;
+        post_parse_analyze_hook = pgsc_post_parse_analyze;
+        prev_planner_hook = planner_hook;
+        planner_hook = pgsc_planner;
+#endif
 	prev_ExecutorStart = ExecutorStart_hook;
 	ExecutorStart_hook = pgsc_ExecutorStart;
 	prev_ExecutorRun = ExecutorRun_hook;
@@ -448,6 +608,9 @@ void _PG_init(void)
 void _PG_fini(void)
 {
 	/* Uninstall hooks. */
+#if PG_VERSION_NUM >= 150000
+	shmem_request_hook = prev_shmem_request_hook;
+#endif
 	shmem_startup_hook = prev_shmem_startup_hook;
 	ExecutorStart_hook = prev_ExecutorStart;
 	ExecutorRun_hook = prev_ExecutorRun;
@@ -455,6 +618,22 @@ void _PG_fini(void)
 	ExecutorEnd_hook = prev_ExecutorEnd;
 	ProcessUtility_hook = prev_ProcessUtility;
 }
+
+/*
+ * shmem_request hook: request additional shared resources. We'll
+ * allocate or attach to the shared resources in pgsc_shmem_startup().
+ */
+#if PG_VERSION_NUM >= 150000
+static void
+pgsc_shmem_request(void)
+{
+	if (prev_shmem_request_hook)
+		prev_shmem_request_hook();
+
+	RequestAddinShmemSpace(pgsc_memsize());
+	RequestNamedLWLockTranche("pg_stat_counters", 1);
+}
+#endif
 
 /*
  * shmem_startup hook: allocate or attach to shared memory,
@@ -723,12 +902,17 @@ pgsc_ExecutorStart(QueryDesc *queryDesc, int eflags)
 		elog(DEBUG1, "pg_stat_counters: %s(): failed to execute getrusage", 
 	                        __FUNCTION__);
 
-	if (prev_ExecutorStart)
-		prev_ExecutorStart(queryDesc, eflags);
-	else
-		standard_ExecutorStart(queryDesc, eflags);
+        if (prev_ExecutorStart)
+                prev_ExecutorStart(queryDesc, eflags);
+        else
+                standard_ExecutorStart(queryDesc, eflags);
 
-	if (pgsc_enabled())
+        /*
+         * If query has queryId zero, don't track it.  This prevents double
+         * counting of optimizable statements that are directly contained in
+         * utility statements.
+         */
+        if (pgsc_enabled(nesting_level) && queryDesc->plannedstmt->queryId != UINT64CONST(0))
 	{
 		/*
 		 * Set up to track total elapsed time in ExecutorRun.  Make sure the
@@ -745,20 +929,186 @@ pgsc_ExecutorStart(QueryDesc *queryDesc, int eflags)
 #else
 			queryDesc->totaltime = InstrAlloc(1, INSTRUMENT_ALL);
 #endif
-
 			MemoryContextSwitchTo(oldcxt);
 		}
 	}
 }
 
+
+#if (PG_VERSION_NUM >= 140000)
+
+/*
+ * Post-parse-analysis hook: mark query with a queryId
+ */
+static void
+pgsc_post_parse_analyze(ParseState *pstate, Query *query, JumbleState *jstate)
+{
+        if (prev_post_parse_analyze_hook)
+                prev_post_parse_analyze_hook(pstate, query, jstate);
+
+        /* Safety check... */
+        if (!pgsc || !pgsc_hash || !pgsc_enabled(nesting_level))
+                return;
+
+        /*
+         * If it's EXECUTE, clear the queryId so that stats will accumulate for
+         * the underlying PREPARE.  But don't do this if we're not tracking
+         * utility statements, to avoid messing up another extension that might be
+         * tracking them.
+         */
+        if (query->utilityStmt)
+        {
+                if (pgsc_track_utility && IsA(query->utilityStmt, ExecuteStmt))
+                {
+                        query->queryId = UINT64CONST(0);
+                        return;
+                }
+        }
+
+        /*
+         * If query jumbling were able to identify any ignorable constants, we
+         * immediately create a hash table entry for the query, so that we can
+         * record the normalized form of the query string.  If there were no such
+         * constants, the normalized string would be the same as the query text
+         * anyway, so there's no need for an early entry.
+         */
+        if (jstate && jstate->clocations_count > 0)
+                pgsc_store(query->commandType
+                           , PGSC_INVALID
+                           , 0
+                           , 0
+                           , NULL       /* sys_info */
+                           , NULL
+                           , NULL
+#if (PG_VERSION_NUM >= 150000)
+                           , NULL
+#endif
+#if (PG_VERSION_NUM >= 180000)
+                           , 0
+                           , 0
+#endif
+			  );
+}
+
+
+/*
+ * Planner hook: forward to regular planner, but measure planning time
+ * if needed.
+ */
+static PlannedStmt *
+pgsc_planner(Query *parse,
+                         const char *query_string,
+                         int cursorOptions,
+                         ParamListInfo boundParams)
+{
+        PlannedStmt *result;
+
+        /*
+         * We can't process the query if no query_string is provided, as
+         * pgsc_store needs it.  We also ignore query without queryid, as it would
+         * be treated as a utility statement, which may not be the case.
+         */
+        if (pgsc_enabled(nesting_level)
+                && pgsc_track_planning && query_string
+                && parse->queryId != UINT64CONST(0))
+        {
+                instr_time      start;
+                instr_time      duration;
+                BufferUsage bufusage_start,
+                                        bufusage;
+                WalUsage        walusage_start,
+                                        walusage;
+
+                /* We need to track buffer usage as the planner can access them. */
+                bufusage_start = pgBufferUsage;
+
+                /*
+                 * Similarly the planner could write some WAL records in some cases
+                 * (e.g. setting a hint bit with those being WAL-logged)
+                 */
+                walusage_start = pgWalUsage;
+                INSTR_TIME_SET_CURRENT(start);
+
+                nesting_level++;
+                PG_TRY();
+                {
+                        if (prev_planner_hook)
+                                result = prev_planner_hook(parse, query_string, cursorOptions,
+                                                                                   boundParams);
+                        else
+                                result = standard_planner(parse, query_string, cursorOptions,
+                                                                                  boundParams);
+                }
+                PG_FINALLY();
+                {
+                        nesting_level--;
+                }
+                PG_END_TRY();
+
+                INSTR_TIME_SET_CURRENT(duration);
+                INSTR_TIME_SUBTRACT(duration, start);
+
+                /* calc differences of buffer counters. */
+                memset(&bufusage, 0, sizeof(BufferUsage));
+                BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);
+
+                /* calc differences of WAL counters. */
+                memset(&walusage, 0, sizeof(WalUsage));
+                WalUsageAccumDiff(&walusage, &pgWalUsage, &walusage_start);
+
+                pgsc_store(parse->commandType
+                           , PGSC_PLAN
+                           , INSTR_TIME_GET_MILLISEC(duration)
+                           , 0
+                           , NULL	/* sys_info */
+                           , &bufusage
+                           , &walusage
+#if (PG_VERSION_NUM >= 150000)
+                           , NULL
+#endif
+#if (PG_VERSION_NUM >= 180000)
+                           , 0
+                           , 0
+#endif
+                );
+        }
+        else
+        {
+                /*
+                 * Even though we're not tracking plan time for this statement, we
+                 * must still increment the nesting level, to ensure that functions
+                 * evaluated during planning are not seen as top-level calls.
+                 */
+                nesting_level++;
+                PG_TRY();
+                {
+                        if (prev_planner_hook)
+                                result = prev_planner_hook(parse, query_string, cursorOptions,
+                                                                                   boundParams);
+                        else
+                                result = standard_planner(parse, query_string, cursorOptions,
+                                                                                  boundParams);
+                }
+                PG_FINALLY();
+                {
+                        nesting_level--;
+                }
+                PG_END_TRY();
+        }
+
+        return result;
+}
+#endif
+
+
 /*
  * ExecutorRun hook: all we need do is track nesting depth
  */
-#if (PG_VERSION_NUM >= 100000)
+#if (PG_VERSION_NUM >= 100000 && PG_VERSION_NUM < 180000)
 static void
 pgsc_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count,
                  bool execute_once)
-#elif (PG_VERSION_NUM >= 90600)
+#elif (PG_VERSION_NUM >= 90600 || PG_VERSION_NUM >= 180000) 
 static void
 pgsc_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, uint64 count)
 #else
@@ -766,10 +1116,10 @@ static void
 pgsc_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, long count)
 #endif
 {
-	nested_level++;
+	nesting_level++;
 	PG_TRY();
 	{
-#if (PG_VERSION_NUM >= 100000)
+#if (PG_VERSION_NUM >= 100000 && PG_VERSION_NUM < 180000)
 		if (prev_ExecutorRun)
 			prev_ExecutorRun(queryDesc, direction, count, execute_once);
 		else
@@ -780,11 +1130,11 @@ pgsc_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, long count)
 		else
 			standard_ExecutorRun(queryDesc, direction, count);
 #endif
-		nested_level--;
+		nesting_level--;
 	}
 	PG_CATCH();
 	{
-		nested_level--;
+		nesting_level--;
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -796,18 +1146,18 @@ pgsc_ExecutorRun(QueryDesc *queryDesc, ScanDirection direction, long count)
 static void
 pgsc_ExecutorFinish(QueryDesc *queryDesc)
 {
-	nested_level++;
+	nesting_level++;
 	PG_TRY();
 	{
 		if (prev_ExecutorFinish)
 			prev_ExecutorFinish(queryDesc);
 		else
 			standard_ExecutorFinish(queryDesc);
-		nested_level--;
+		nesting_level--;
 	}
 	PG_CATCH();
 	{
-		nested_level--;
+		nesting_level--;
 		PG_RE_THROW();
 	}
 	PG_END_TRY();
@@ -821,7 +1171,8 @@ pgsc_ExecutorEnd(QueryDesc *queryDesc)
 {
 	SysInfo sys_info;
 
-	if (queryDesc->totaltime && pgsc_enabled())
+	if (queryDesc->plannedstmt->queryId != UINT64CONST(0) 
+                && queryDesc->totaltime && pgsc_enabled(nesting_level))
 	{
 		/*
 		 * Make sure stats accumulation is done.  (Note: it's okay if several
@@ -858,13 +1209,23 @@ pgsc_ExecutorEnd(QueryDesc *queryDesc)
 		sys_info.nvcsws = rusage_end.ru_nvcsw - rusage_start.ru_nvcsw;
 		sys_info.nivcsws = rusage_end.ru_nivcsw - rusage_start.ru_nivcsw;
 #endif
-		pgsc_store(queryDesc->operation,
-		           queryDesc->totaltime->total * 1000.0, /* convert to msec */
-		           queryDesc->estate->es_processed,
-		           &sys_info,
-		           &queryDesc->totaltime->bufusage
+
+		pgsc_store(queryDesc->operation
+                           , PGSC_EXEC
+		           , queryDesc->totaltime->total * 1000.0 /* convert to msec */
+//                                   queryDesc->estate->es_total_processed,
+		           , queryDesc->estate->es_processed
+		           , &sys_info
+		           , &queryDesc->totaltime->bufusage
 #if (PG_VERSION_NUM >= 130000)
 		           , &queryDesc->totaltime->walusage
+#endif
+#if (PG_VERSION_NUM >= 150000)
+                           , queryDesc->estate->es_jit ? &queryDesc->estate->es_jit->instr : NULL
+#endif
+#if (PG_VERSION_NUM >= 180000)
+                           , queryDesc->estate->es_parallel_workers_to_launch
+                           , queryDesc->estate->es_parallel_workers_launched
 #endif
 		);
 	}
@@ -908,6 +1269,26 @@ pgsc_ProcessUtility(Node *parsetree, const char *queryString,
 #if (PG_VERSION_NUM >= 100000)
 	Node *parsetree = pstmt->utilityStmt;
 #endif
+        bool  enabled = pgsc_track_utility && pgsc_enabled(nesting_level);
+
+        /*
+         * Force utility statements to get queryId zero.  We do this even in cases
+         * where the statement contains an optimizable statement for which a
+         * queryId could be derived (such as EXPLAIN or DECLARE CURSOR).  For such
+         * cases, runtime control will first go through ProcessUtility and then
+         * the executor, and we don't want the executor hooks to do anything,
+         * since we are already measuring the statement's costs at the utility
+         * level.
+         *
+         * Note that this is only done if pg_stat_statements is enabled and
+         * configured to track utility statements, in the unlikely possibility
+         * that user configured another extension to handle utility statements
+         * only.
+         */
+#if (PG_VERSION_NUM >= 130000)
+        if (enabled)
+                pstmt->queryId = UINT64CONST(0);
+#endif
 	/*
 	 * If it's an EXECUTE statement, we don't track it and don't increment the
 	 * nesting level.  This allows the cycles to be charged to the underlying
@@ -922,7 +1303,7 @@ pgsc_ProcessUtility(Node *parsetree, const char *queryString,
 	 *
 	 * Likewise, we don't track execution of DEALLOCATE.
 	 */
-	if (pgsc_track_utility && pgsc_enabled() &&
+	if (enabled &&
 	    !IsA(parsetree, ExecuteStmt) &&
 	    !IsA(parsetree, PrepareStmt) &&
 	    !IsA(parsetree, DeallocateStmt))
@@ -944,7 +1325,7 @@ pgsc_ProcessUtility(Node *parsetree, const char *queryString,
 
 		INSTR_TIME_SET_CURRENT(start);
 
-		nested_level++;
+		nesting_level++;
 		PG_TRY();
 		{
 #if (PG_VERSION_NUM >= 140000)
@@ -984,11 +1365,11 @@ pgsc_ProcessUtility(Node *parsetree, const char *queryString,
 				                        context, params,
 				                        dest, completionTag);
 #endif
-			nested_level--;
+			nesting_level--;
 		}
 		PG_CATCH();
 		{
-			nested_level--;
+			nesting_level--;
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
@@ -1022,13 +1403,21 @@ pgsc_ProcessUtility(Node *parsetree, const char *queryString,
 		memset(&bufusage, 0, sizeof(BufferUsage));
 		BufferUsageAccumDiff(&bufusage, &pgBufferUsage, &bufusage_start);
 
-		pgsc_store(CMD_UTILITY,                       /* signal that it's a utility stmt */
-		           INSTR_TIME_GET_MILLISEC(duration), /* total_time */
-		           rows,
-		           NULL,                              /* sysinfo */
-		           &bufusage
+		pgsc_store(CMD_UTILITY                         /* signal that it's a utility stmt */
+                           , PGSC_EXEC
+		           , INSTR_TIME_GET_MILLISEC(duration) /* total_time */
+		           , rows
+		           , NULL                              /* sysinfo */
+		           , &bufusage
 #if (PG_VERSION_NUM >= 130000)
 		           , &walusage
+#endif
+#if (PG_VERSION_NUM >= 150000)
+                           , NULL
+#endif
+#if (PG_VERSION_NUM >= 180000)
+                           , 0
+                           , 0
 #endif
 		          );
 	}
@@ -1313,26 +1702,48 @@ aggstats_reset(void)
  * Update counters
  */
 static void
-pgsc_update_counters(volatile Counters *c, double total_time, uint64 rows, SysInfo *sys_info, const BufferUsage *bufusage
+pgsc_update_counters(volatile Counters *c
+//#if (PG_VERSION_NUM >= 130000)
+                     , pgscStoreKind kind
+//#endif
+                     , double total_time, uint64 rows, SysInfo *sys_info, const BufferUsage *bufusage
 #if (PG_VERSION_NUM >= 130000)
                      , const WalUsage *walusage
 #endif
+#if (PG_VERSION_NUM >= 150000)
+                     , const struct JitInstrumentation *jitusage
+#endif
+#if (PG_VERSION_NUM >= 180000)
+                     , int parallel_workers_to_launch
+                     , int parallel_workers_launched
+#endif
 )
 {
-	c->calls++;
-	if (total_time >= 20000)
-		c->calls_gt20s++;
-	else if (total_time >= 10000)
-		c->calls_10_20s++;
-	else if (total_time >= 5000)
-		c->calls_5_10s++;
-	else if (total_time >= 3000)
-		c->calls_3_5s++;
-	else if (total_time >= 2000)
-		c->calls_2_3s++;
-	else if (total_time >= 1000)
-		c->calls_1_2s++;
-	c->total_time += total_time;
+	Assert(kind == PGSC_PLAN || kind == PGSC_EXEC);
+
+	//c->calls++;
+        c->calls[kind] += 1;
+	/*
+	 * The histogram is used only for the EXEC stage
+	 *
+	 */
+        if (kind == PGSC_EXEC)
+	{
+		if (total_time >= 20000)
+			c->calls_gt20s++;
+		else if (total_time >= 10000)
+			c->calls_10_20s++;
+		else if (total_time >= 5000)
+			c->calls_5_10s++;
+		else if (total_time >= 3000)
+			c->calls_3_5s++;
+		else if (total_time >= 2000)
+			c->calls_2_3s++;
+		else if (total_time >= 1000)
+			c->calls_1_2s++;
+	}
+
+	c->total_time[kind] += total_time;
 	c->rows += rows;
 	if (bufusage)
 	{
@@ -1346,8 +1757,19 @@ pgsc_update_counters(volatile Counters *c, double total_time, uint64 rows, SysIn
 		c->local_blks_written += bufusage->local_blks_written;
 		c->temp_blks_read += bufusage->temp_blks_read;
 		c->temp_blks_written += bufusage->temp_blks_written;
+#if (PG_VERSION_NUM >= 170000)
+                c->shared_blk_read_time += INSTR_TIME_GET_MILLISEC(bufusage->shared_blk_read_time);
+                c->shared_blk_write_time += INSTR_TIME_GET_MILLISEC(bufusage->shared_blk_write_time);
+                c->local_blk_read_time += INSTR_TIME_GET_MILLISEC(bufusage->local_blk_read_time);
+                c->local_blk_write_time += INSTR_TIME_GET_MILLISEC(bufusage->local_blk_write_time);
+#else
 		c->blk_read_time += INSTR_TIME_GET_MILLISEC(bufusage->blk_read_time);
 		c->blk_write_time += INSTR_TIME_GET_MILLISEC(bufusage->blk_write_time);
+#endif
+#if (PG_VERSION_NUM >= 150000)
+                c->temp_blk_read_time += INSTR_TIME_GET_MILLISEC(bufusage->temp_blk_read_time);
+                c->temp_blk_write_time += INSTR_TIME_GET_MILLISEC(bufusage->temp_blk_write_time);
+#endif  
 	}
 #if (PG_VERSION_NUM >= 130000)
 	if (walusage)
@@ -1355,7 +1777,40 @@ pgsc_update_counters(volatile Counters *c, double total_time, uint64 rows, SysIn
 		c->wal_records += walusage->wal_records;
 		c->wal_fpi += walusage->wal_fpi;
 		c->wal_bytes += walusage->wal_bytes;
+#if (PG_VERSION_NUM >= 180000)
+                c->wal_buffers_full += walusage->wal_buffers_full;
+#endif
 	}
+#endif
+
+#if (PG_VERSION_NUM >= 150000)
+	if (jitusage)
+	{
+		c->jit_functions += jitusage->created_functions;
+		c->jit_generation_time += INSTR_TIME_GET_MILLISEC(jitusage->generation_counter);
+#if (PG_VERSION_NUM >= 170000)
+		if (INSTR_TIME_GET_MILLISEC(jitusage->deform_counter))
+			c->jit_deform_count++;
+		c->jit_deform_time += INSTR_TIME_GET_MILLISEC(jitusage->deform_counter);
+#endif
+		if (INSTR_TIME_GET_MILLISEC(jitusage->inlining_counter))
+			c->jit_inlining_count++;
+		c->jit_inlining_time += INSTR_TIME_GET_MILLISEC(jitusage->inlining_counter);
+
+		if (INSTR_TIME_GET_MILLISEC(jitusage->optimization_counter))
+			c->jit_optimization_count++;
+		c->jit_optimization_time += INSTR_TIME_GET_MILLISEC(jitusage->optimization_counter);
+
+		if (INSTR_TIME_GET_MILLISEC(jitusage->emission_counter))
+			c->jit_emission_count++;
+		c->jit_emission_time += INSTR_TIME_GET_MILLISEC(jitusage->emission_counter);
+	}
+#endif
+
+#if (PG_VERSION_NUM >= 180000)
+	/* parallel worker counters */
+	c->parallel_workers_to_launch += parallel_workers_to_launch;
+	c->parallel_workers_launched += parallel_workers_launched;
 #endif
 	if (sys_info)
 	{
@@ -1381,10 +1836,20 @@ pgsc_update_counters(volatile Counters *c, double total_time, uint64 rows, SysIn
  * Store some statistics for key and whole database cluster
  */
 static void
-pgsc_store(CmdType operation, double total_time, uint64 rows, SysInfo *sys_info, const BufferUsage *bufusage
+pgsc_store(CmdType operation
+           , pgscStoreKind kind
+           , double total_time, uint64 rows, SysInfo *sys_info, const BufferUsage *bufusage
 #if (PG_VERSION_NUM >= 130000)
            , const WalUsage *walusage
 #endif
+#if (PG_VERSION_NUM >= 150000)
+           , const struct JitInstrumentation *jitusage
+#endif
+#if (PG_VERSION_NUM >= 180000)
+           , int parallel_workers_to_launch
+           , int parallel_workers_launched
+#endif
+
 )
 {
 	pgscHashKey key;
@@ -1429,19 +1894,41 @@ pgsc_store(CmdType operation, double total_time, uint64 rows, SysInfo *sys_info,
 			volatile pgscEntry *e = (volatile pgscEntry *)entry;
 
 			SpinLockAcquire(&e->mutex);
-			pgsc_update_counters(&e->counters, total_time, rows, sys_info, bufusage
+			pgsc_update_counters(&e->counters
+                                             , kind
+                                             , total_time, rows, sys_info, bufusage
 #if (PG_VERSION_NUM >= 130000)
 			                     , walusage
+#endif
+#if (PG_VERSION_NUM >= 150000)
+			                     , jitusage
+#endif
+#if (PG_VERSION_NUM >= 180000)
+			                     , parallel_workers_to_launch
+			                     , parallel_workers_launched
 #endif
 			                    );
 			SpinLockRelease(&e->mutex);
 		}
 
 		/* update aggregate statistics */
-		pgsc_update_counters(&a->counters, total_time, rows, sys_info, bufusage
+		pgsc_update_counters(&a->counters
+                                     , kind
+                                     , total_time
+				     , rows
+				     , sys_info
+				     , bufusage
 #if (PG_VERSION_NUM >= 130000)
 		                     , walusage
 #endif
+#if (PG_VERSION_NUM >= 150000)
+                                     , jitusage
+#endif
+#if (PG_VERSION_NUM >= 180000)
+                                     , parallel_workers_to_launch
+                                     , parallel_workers_launched
+#endif
+
 		                    );
 		SpinLockRelease(&a->mutex);
 	}
@@ -1509,8 +1996,8 @@ pg_stat_counters_info(PG_FUNCTION_ARGS)
 }
 
 
-#define PG_STAT_COUNTERS_AGG_COLS   38
-#define PG_STAT_COUNTERS_COLS       41
+#define PG_STAT_COUNTERS_AGG_COLS   55
+#define PG_STAT_COUNTERS_COLS       58
 
 /*
  * Retrieve call statistics per key.
@@ -1575,7 +2062,9 @@ pg_stat_counters(PG_FUNCTION_ARGS)
 		bool      nulls[PG_STAT_COUNTERS_COLS];
 		int       i = 0;
 		Counters  tmp;
-		int64     reads, writes;
+#ifdef HAVE_GETRUSAGE		
+		int64     reads, writes;	/* RUSAGE */
+#endif
 
 		memset(values, 0, sizeof(values));
 		memset(nulls, 0, sizeof(nulls));
@@ -1593,14 +2082,27 @@ pg_stat_counters(PG_FUNCTION_ARGS)
 			SpinLockRelease(&e->mutex);
 		}
 
-		values[i++] = Int64GetDatumFast(tmp.calls);
-		values[i++] = Int64GetDatumFast(tmp.calls_1_2s);
-		values[i++] = Int64GetDatumFast(tmp.calls_2_3s);
-		values[i++] = Int64GetDatumFast(tmp.calls_3_5s);
-		values[i++] = Int64GetDatumFast(tmp.calls_5_10s);
-		values[i++] = Int64GetDatumFast(tmp.calls_10_20s);
-		values[i++] = Int64GetDatumFast(tmp.calls_gt20s);
-		values[i++] = Float8GetDatumFast(tmp.total_time);
+                values[i++] = Int64GetDatumFast(tmp.calls_1_2s);
+                values[i++] = Int64GetDatumFast(tmp.calls_2_3s);
+                values[i++] = Int64GetDatumFast(tmp.calls_3_5s);
+                values[i++] = Int64GetDatumFast(tmp.calls_5_10s);
+                values[i++] = Int64GetDatumFast(tmp.calls_10_20s);
+                values[i++] = Int64GetDatumFast(tmp.calls_gt20s);
+
+		for (int kind = 0; kind < PGSC_NUMKIND; kind++)
+		{
+	                if (kind == PGSC_EXEC || PG_VERSION_NUM >= 130000)
+			{
+				values[i++] = Int64GetDatumFast(tmp.calls[kind]);
+				values[i++] = Float8GetDatumFast(tmp.total_time[kind]);
+			}
+			else
+			{
+				nulls[i++] = true;
+				nulls[i++] = true;
+			}
+		}
+
 		values[i++] = Int64GetDatumFast(tmp.rows);
 		values[i++] = Int64GetDatumFast(tmp.shared_blks_hit);
 		values[i++] = Int64GetDatumFast(tmp.shared_blks_read);
@@ -1612,8 +2114,24 @@ pg_stat_counters(PG_FUNCTION_ARGS)
 		values[i++] = Int64GetDatumFast(tmp.local_blks_written);
 		values[i++] = Int64GetDatumFast(tmp.temp_blks_read);
 		values[i++] = Int64GetDatumFast(tmp.temp_blks_written);
-		values[i++] = Float8GetDatumFast(tmp.blk_read_time);
-		values[i++] = Float8GetDatumFast(tmp.blk_write_time);
+#if (PG_VERSION_NUM >= 170000)
+		values[i++] = Float8GetDatumFast(tmp.shared_blk_read_time);
+		values[i++] = Float8GetDatumFast(tmp.shared_blk_write_time);
+		values[i++] = Float8GetDatumFast(tmp.local_blk_read_time);
+		values[i++] = Float8GetDatumFast(tmp.local_blk_write_time);
+#else
+		values[i++] = Float8GetDatumFast(tmp.blk_read_time);    /* aka shared_blk_read_time */
+		values[i++] = Float8GetDatumFast(tmp.blk_write_time);   /* aka shared_blk_write_time */
+		nulls[i++] = true; /* local_blk_read_time */
+		nulls[i++] = true; /* local_blk_write_time */
+#endif
+#if (PG_VERSION_NUM >= 150000)
+		values[i++] = Float8GetDatumFast(tmp.temp_blk_read_time);
+		values[i++] = Float8GetDatumFast(tmp.temp_blk_write_time);
+#else
+		nulls[i++] = true; /* temp_blk_read_time  */
+		nulls[i++] = true; /* temp_blk_write_time */
+#endif
 #if (PG_VERSION_NUM >= 130000)
 		{
 			char            buf[256];
@@ -1635,6 +2153,44 @@ pg_stat_counters(PG_FUNCTION_ARGS)
 		nulls[i++] = true; /* # of WAL records generated */
 		nulls[i++] = true; /* # of WAL full page images generated */
 		nulls[i++] = true; /* total amount of WAL bytes generated */
+#endif
+#if (PG_VERSION_NUM >= 180000)
+		values[i++] = Int64GetDatumFast(tmp.wal_buffers_full);
+#else
+		nulls[i++] = true; /* Number of times the WAL buffers became full */
+#endif
+#if (PG_VERSION_NUM >= 150000)
+                values[i++] = Int64GetDatumFast(tmp.jit_functions);
+                values[i++] = Float8GetDatumFast(tmp.jit_generation_time);
+                values[i++] = Int64GetDatumFast(tmp.jit_inlining_count);
+                values[i++] = Float8GetDatumFast(tmp.jit_inlining_time);
+                values[i++] = Int64GetDatumFast(tmp.jit_optimization_count);
+                values[i++] = Float8GetDatumFast(tmp.jit_optimization_time);
+                values[i++] = Int64GetDatumFast(tmp.jit_emission_count);
+                values[i++] = Float8GetDatumFast(tmp.jit_emission_time);
+#else
+		nulls[i++] = true; /* jit_functions */
+		nulls[i++] = true; /* jit_generation_time */
+		nulls[i++] = true; /* jit_inlining_count */
+		nulls[i++] = true; /* jit_inlining_time */
+		nulls[i++] = true; /* jit_optimization_count */
+		nulls[i++] = true; /* jit_optimization_time */
+		nulls[i++] = true; /* jit_emission_count */
+		nulls[i++] = true; /* jit_emission_time */
+#endif
+#if (PG_VERSION_NUM >= 170000)
+                values[i++] = Int64GetDatumFast(tmp.jit_deform_count);
+                values[i++] = Float8GetDatumFast(tmp.jit_deform_time);
+#else
+		nulls[i++] = true; /* jit_deform_count */
+		nulls[i++] = true; /* jit_deform_time */
+#endif
+#if (PG_VERSION_NUM >= 180000)
+		values[i++] = Int64GetDatumFast(tmp.parallel_workers_to_launch);
+		values[i++] = Int64GetDatumFast(tmp.parallel_workers_launched);
+#else
+		nulls[i++] = true; /* parallel_workers_to_launch */
+		nulls[i++] = true; /* parallel_workers_launched */
 #endif
 		values[i++] = Float8GetDatumFast(tmp.utime);
 		values[i++] = Float8GetDatumFast(tmp.stime);
@@ -1670,7 +2226,7 @@ pg_stat_counters(PG_FUNCTION_ARGS)
 	/* clean up and return the tuplestore */
 	LWLockRelease(pgsc->lock);
 
-	tuplestore_donestoring(tupstore);
+//	tuplestore_donestoring(tupstore);
 
 	return (Datum)0;
 }
@@ -1686,8 +2242,10 @@ pg_stat_counters_all(PG_FUNCTION_ARGS)
 	Datum           values[PG_STAT_COUNTERS_AGG_COLS];
 	bool            nulls[PG_STAT_COUNTERS_AGG_COLS];
 	Counters        tmp;
-	int64           reads, writes;
-	int             i = 0;
+        int             i = 0;
+#ifdef HAVE_GETRUSAGE
+	int64           reads, writes;		/* RUSAGE */
+#endif
 
 	if (!pgsc || !pgsc_hash || !pgsc_aggs)
 		ereport(ERROR,
@@ -1710,14 +2268,27 @@ pg_stat_counters_all(PG_FUNCTION_ARGS)
 		SpinLockRelease(&a->mutex);
 	}
 
-	values[i++] = Int64GetDatumFast(tmp.calls);
-	values[i++] = Int64GetDatumFast(tmp.calls_1_2s);
-	values[i++] = Int64GetDatumFast(tmp.calls_2_3s);
-	values[i++] = Int64GetDatumFast(tmp.calls_3_5s);
-	values[i++] = Int64GetDatumFast(tmp.calls_5_10s);
-	values[i++] = Int64GetDatumFast(tmp.calls_10_20s);
-	values[i++] = Int64GetDatumFast(tmp.calls_gt20s);
-	values[i++] = Float8GetDatumFast(tmp.total_time);
+        values[i++] = Int64GetDatumFast(tmp.calls_1_2s);
+        values[i++] = Int64GetDatumFast(tmp.calls_2_3s);
+        values[i++] = Int64GetDatumFast(tmp.calls_3_5s);
+        values[i++] = Int64GetDatumFast(tmp.calls_5_10s);
+        values[i++] = Int64GetDatumFast(tmp.calls_10_20s);
+        values[i++] = Int64GetDatumFast(tmp.calls_gt20s);
+
+	for (int kind = 0; kind < PGSC_NUMKIND; kind++)
+	{
+		if (kind == PGSC_EXEC || PG_VERSION_NUM >= 130000)
+		{
+			values[i++] = Int64GetDatumFast(tmp.calls[kind]);
+			values[i++] = Float8GetDatumFast(tmp.total_time[kind]);
+                }
+                else
+                {
+                        nulls[i++] = true; 
+                        nulls[i++] = true; 
+		}
+	}
+
 	values[i++] = Int64GetDatumFast(tmp.rows);
 	values[i++] = Int64GetDatumFast(tmp.shared_blks_hit);
 	values[i++] = Int64GetDatumFast(tmp.shared_blks_read);
@@ -1729,8 +2300,27 @@ pg_stat_counters_all(PG_FUNCTION_ARGS)
 	values[i++] = Int64GetDatumFast(tmp.local_blks_written);
 	values[i++] = Int64GetDatumFast(tmp.temp_blks_read);
 	values[i++] = Int64GetDatumFast(tmp.temp_blks_written);
-	values[i++] = Float8GetDatumFast(tmp.blk_read_time);
-	values[i++] = Float8GetDatumFast(tmp.blk_write_time);
+
+#if (PG_VERSION_NUM >= 170000)
+	values[i++] = Float8GetDatumFast(tmp.shared_blk_read_time);
+	values[i++] = Float8GetDatumFast(tmp.shared_blk_write_time);
+	values[i++] = Float8GetDatumFast(tmp.local_blk_read_time);
+	values[i++] = Float8GetDatumFast(tmp.local_blk_write_time);
+#else
+	values[i++] = Float8GetDatumFast(tmp.blk_read_time);	/* aka shared_blk_read_time */
+	values[i++] = Float8GetDatumFast(tmp.blk_write_time);	/* aka shared_blk_write_time */
+        nulls[i++] = true; /* local_blk_read_time */
+        nulls[i++] = true; /* local_blk_write_time */
+#endif
+
+#if (PG_VERSION_NUM >= 150000)
+	values[i++] = Float8GetDatumFast(tmp.temp_blk_read_time);
+	values[i++] = Float8GetDatumFast(tmp.temp_blk_write_time);
+#else
+	nulls[i++] = true; /* temp_blk_read_time  */
+	nulls[i++] = true; /* temp_blk_write_time */
+#endif
+
 #if (PG_VERSION_NUM >= 130000)
 	{
 		char            buf[256];
@@ -1753,8 +2343,50 @@ pg_stat_counters_all(PG_FUNCTION_ARGS)
 	nulls[i++] = true; /* # of WAL full page images generated */
 	nulls[i++] = true; /* total amount of WAL bytes generated */
 #endif
+#if (PG_VERSION_NUM >= 180000)
+	values[i++] = Int64GetDatumFast(tmp.wal_buffers_full);
+#else
+	nulls[i++] = true; /* Number of times the WAL buffers became full */
+#endif
+
+#if (PG_VERSION_NUM >= 150000)
+	values[i++] = Int64GetDatumFast(tmp.jit_functions);
+	values[i++] = Float8GetDatumFast(tmp.jit_generation_time);
+	values[i++] = Int64GetDatumFast(tmp.jit_inlining_count);
+	values[i++] = Float8GetDatumFast(tmp.jit_inlining_time);
+	values[i++] = Int64GetDatumFast(tmp.jit_optimization_count);
+	values[i++] = Float8GetDatumFast(tmp.jit_optimization_time);
+	values[i++] = Int64GetDatumFast(tmp.jit_emission_count);
+	values[i++] = Float8GetDatumFast(tmp.jit_emission_time);
+#else
+	nulls[i++] = true; /* jit_functions */
+	nulls[i++] = true; /* jit_generation_time */
+	nulls[i++] = true; /* jit_inlining_count */
+	nulls[i++] = true; /* jit_inlining_time */
+	nulls[i++] = true; /* jit_optimization_count */
+	nulls[i++] = true; /* jit_optimization_time */
+	nulls[i++] = true; /* jit_emission_count */
+	nulls[i++] = true; /* jit_emission_time */
+#endif
+
+#if (PG_VERSION_NUM >= 170000)
+	values[i++] = Int64GetDatumFast(tmp.jit_deform_count);
+	values[i++] = Float8GetDatumFast(tmp.jit_deform_time);
+#else
+	nulls[i++] = true; /* jit_deform_count */
+	nulls[i++] = true; /* jit_deform_time */
+#endif
+
+#if (PG_VERSION_NUM >= 180000)
+	values[i++] = Int64GetDatumFast(tmp.parallel_workers_to_launch);
+	values[i++] = Int64GetDatumFast(tmp.parallel_workers_launched);
+#else
+        nulls[i++] = true; /* parallel_workers_to_launch */
+        nulls[i++] = true; /* parallel_workers_launched */
+#endif
 	values[i++] = Float8GetDatumFast(tmp.utime);
 	values[i++] = Float8GetDatumFast(tmp.stime);
+
 #ifdef HAVE_GETRUSAGE
 	values[i++] = Int64GetDatumFast(tmp.minflts);
 	values[i++] = Int64GetDatumFast(tmp.majflts);
@@ -1782,5 +2414,30 @@ pg_stat_counters_all(PG_FUNCTION_ARGS)
 #endif
 
 	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+
+
+/*
+ * Return the name of the operation. It is used to correct output 
+ * a text representation of the operation in various versions of
+ * postgresql.
+ */
+Datum
+get_cmd_name(PG_FUNCTION_ARGS)
+{
+	Oid cmdid = PG_GETARG_OID(0);
+
+#if (PG_VERSION_NUM <= 140000)
+        const char* cmd_name[] = {"" /* UNKNOWN */ , "SELECT", "UPDATE", "INSERT", "DELETE", "UTILITY", "NOTHING"};
+#else
+        const char* cmd_name[] = {"" /* UNKNOWN */, "SELECT", "UPDATE", "INSERT", "DELETE", "MERGE", "UTILITY", "NOTHING"};
+#endif
+	int max_cmdid = sizeof(cmd_name)/sizeof(cmd_name[0]);
+
+        if (cmdid < 0 || cmdid >= max_cmdid)
+		elog(ERROR, "invalid operationid");
+
+
+	PG_RETURN_TEXT_P(cstring_to_text(cmd_name[cmdid]));
 }
 

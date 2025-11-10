@@ -1,5 +1,43 @@
 
-### pg_stat_counters v1.0 (September 9, 2021) ###
+1.1 (2025-05-31)
 
-* Initial 1.0 release
+  Miscellaneous:
+
+    - Add function get_cmd_name to correct output a text representation 
+      of the operation in various versions of postgresql.
+
+    pg18 compatibility:
+
+    - Add pg_stat_counters columns to report parallel activity. The new columns
+      are parallel_workers_to_launch and parallel_workers_launched.
+    - Add pg_stat_counters.wal_buffers_full to report full WAL buffers.
+
+    pg17 compatibility:
+
+    - Rename I/O block read/write timing statistics columns of pg_stat_counters.
+      This renames blk_read_time to shared_blk_read_time, and blk_write_time to
+      shared_blk_write_time.
+    - Add local I/O block read/write timing statistics columns of pg_stat_counters.
+      The new columns are local_blk_read_time and local_blk_write_time.
+    - Add JIT deform_counter details to pg_stat_counters.
+
+    pg15 compatibility:
+
+    - Add counters for temporary file block I/O to pg_stat_counters.
+    - Add JIT counters to pg_stat_counters.
+
+    pg13 compatibility:
+
+    - Add pg_stat_counters.track_planning, similar to pg_stat_statements, to
+      track usge during planning, and maintain 2 sets of counters, depending
+      on whether it was during planning or execution. Requires PostgreSQL 13 
+      or above
+    - Allow pg_stat_counters to optionally track the planning time of statements
+    - Allow pg_stat_counters to track WAL usage statistics.
+
+
+1.0 (2022-03-05)
+
+    - Initial release
+
 
