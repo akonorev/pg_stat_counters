@@ -69,6 +69,13 @@ The following GUCs can be configured in ``postgresql.conf``:
   Utility commands are all those other than SELECT, INSERT, UPDATE and DELETE. Only superusers 
   can change this setting.
 
+- *pg_stat_counters.track_planning* (boolean, default ``off``)
+
+  ``pg_stat_counters.track_planning`` controls whether planning operations and duration are tracked
+  by the module. Enabling this parameter may incur a noticeable performance penalty, especially when
+  statements with identical query structure are executed by many concurrent connections. This 
+  parameter is available from version pg13. Only superusers can change this setting. 
+
 - *pg_stat_counters.save* (boolean, default ``on``)
 
   ``pg_stat_counters.save`` specifies whether to save the query execution statistics across the
@@ -95,97 +102,162 @@ This view displays the query execution statistics grouped by database ID, user I
 contains up to ``pg_stat_counters.max`` number of rows. The oldest records will be deallocated and the
 ``dealloc`` field in the ``pg_stat_counters_info`` will be respectively increased if observes more calls.
 
-+---------------------+------------------+----------------------------------------------------------------------+
-| Name                | Type             | Description                                                          |
-+=====================+==================+======================================================================+
-| userid              | oid              | User OID                                                             |
-+---------------------+------------------+----------------------------------------------------------------------+
-| dbid                | oid              | Database OID                                                         |
-+---------------------+------------------+----------------------------------------------------------------------+
-| operation           | oid              | Operation OID                                                        |
-+---------------------+------------------+----------------------------------------------------------------------+
-| calls               | bigint           | Number of times the statement was executed                           |
-+---------------------+------------------+----------------------------------------------------------------------+
-| calls_1_2s          | bigint           | Number of times the statement was executed with duration             |
-|                     |                  | greater than or equal 1 seconds and less than 2 seconds              |
-+---------------------+------------------+----------------------------------------------------------------------+
-| calls_2_3s          | bigint           | Number of times the statement was executed with duration             |
-|                     |                  | greater than or equal 2 seconds and less than 3 seconds              |
-+---------------------+------------------+----------------------------------------------------------------------+
-| calls_3_5s          | bigint           | Number of times the statement was executed with duration             |
-|                     |                  | greater than or equal 3 seconds and less than 5 seconds              |
-+---------------------+------------------+----------------------------------------------------------------------+
-| calls_5_10s         | bigint           | Number of times the statement was executed with duration             |
-|                     |                  | greater than or equal 5 seconds and less than 10 seconds             |
-+---------------------+------------------+----------------------------------------------------------------------+
-| calls_10_20s        | bigint           | Number of times the statement was executed with duration             |
-|                     |                  | greater than or equal 10 seconds and less than 20 seconds            |
-+---------------------+------------------+----------------------------------------------------------------------+
-| calls_gt20s         | bigint           | Number of times the statement was executed with duration             |
-|                     |                  | greater than or equal 20 seconds                                     |
-+---------------------+------------------+----------------------------------------------------------------------+
-| total_time          | double precision | Total time spent executing the statement, in milliseconds            |
-+---------------------+------------------+----------------------------------------------------------------------+
-| rows                | bigint           | Total number of rows retrieved or affected by the statement          | 
-+---------------------+------------------+----------------------------------------------------------------------+
-| shared_blks_hit     | bigint           | Total number of shared block cache hits by the statement             |
-+---------------------+------------------+----------------------------------------------------------------------+
-| shared_blks_read    | bigint           | Total number of shared blocks read by the statement                  |
-+---------------------+------------------+----------------------------------------------------------------------+
-| shared_blks_dirtied | bigint           | Total number of shared blocks dirtied by the statement               |
-+---------------------+------------------+----------------------------------------------------------------------+
-| shared_blks_written | bigint           | Total number of shared blocks written by the statement               |
-+---------------------+------------------+----------------------------------------------------------------------+
-| local_blks_hit      | bigint           | Total number of local block cache hits by the statement              |
-+---------------------+------------------+----------------------------------------------------------------------+
-| local_blks_read     | bigint           | Total number of local blocks read by the statement                   |
-+---------------------+------------------+----------------------------------------------------------------------+
-| local_blks_dirtied  | bigint           | Total number of local blocks dirtied by the statement                |
-+---------------------+------------------+----------------------------------------------------------------------+
-| local_blks_written  | bigint           | Total number of local blocks written by the statement                |
-+---------------------+------------------+----------------------------------------------------------------------+
-| temp_blks_read      | bigint           | Total number of temp blocks read by the statement                    |
-+---------------------+------------------+----------------------------------------------------------------------+
-| temp_blks_written   | bigint           | Total number of temp blocks written by the statement                 |
-+---------------------+------------------+----------------------------------------------------------------------+
-| blk_read_time       | double precision | Total time the statement spent reading blocks, in milliseconds       |
-|                     |                  | (if ``track_io_timing`` is enabled, otherwise zero)                  |
-+---------------------+------------------+----------------------------------------------------------------------+
-| blk_write_time      | double precision | Total time the statement spent writing blocks, in milliseconds       |
-|                     |                  | (if ``track_io_timing`` is enabled, otherwise zero)                  |
-+---------------------+------------------+----------------------------------------------------------------------+
-| wal_records         | bigint           | Total number of WAL records generated by statements                  |
-+---------------------+------------------+----------------------------------------------------------------------+
-| wal_fpi             | bigint           | Total number of WAL full page images generated by statements         |
-+---------------------+------------------+----------------------------------------------------------------------+
-| wal_bytes           | numeric          | Total amount of WAL generated by statements in bytes                 |
-+---------------------+------------------+----------------------------------------------------------------------+
-| cpu_user_time       | double precision | User CPU time used executing statements, in milliseconds             |
-+---------------------+------------------+----------------------------------------------------------------------+
-| cpu_sys_time        | double precision | System CPU time used executing statements, in milliseconds           |
-+---------------------+------------------+----------------------------------------------------------------------+
-| minflts             | bigint           | Number of page reclaims (soft page faults) executing statements      |
-+---------------------+------------------+----------------------------------------------------------------------+
-| majflts             | bigint           | Number of page faults (hard page faults) executing statements        |
-+---------------------+------------------+----------------------------------------------------------------------+
-| nswaps              | bigint           | Number of swaps executing statements                                 |
-+---------------------+------------------+----------------------------------------------------------------------+
-| reads               | bigint           | Number of bytes read by the filesystem layer executing statements    |
-+---------------------+------------------+----------------------------------------------------------------------+
-| writes              | bigint           | Number of bytes written by the filesystem layer executing statements |
-+---------------------+------------------+----------------------------------------------------------------------+
-| msgsnds             | bigint           | Number of IPC messages sent executing statements                     |
-+---------------------+------------------+----------------------------------------------------------------------+
-| msgrcvs             | bigint           | Number of IPC messages received executing statements                 |
-+---------------------+------------------+----------------------------------------------------------------------+
-| nsignals            | bigint           | Number of signals received executing statements                      |
-+---------------------+------------------+----------------------------------------------------------------------+
-| nvcsws              | bigint           | Number of voluntary context switches executing statements            |
-+---------------------+------------------+----------------------------------------------------------------------+
-| nivcsws             | bigint           | Number of involuntary context switches executing statements          |
-+---------------------+------------------+----------------------------------------------------------------------+
++----------------------------+------------------+----------------------------------------------------------------------+
+| Name                       | Type             | Description                                                          |
++============================+==================+======================================================================+
+| userid                     | oid              | User OID                                                             |
++----------------------------+------------------+----------------------------------------------------------------------+
+| dbid                       | oid              | Database OID                                                         |
++----------------------------+------------------+----------------------------------------------------------------------+
+| operation                  | oid              | Operation OID                                                        |
++----------------------------+------------------+----------------------------------------------------------------------+
+| calls_1_2s                 | bigint           | Number of times the statement was executed with duration             |
+|                            |                  | greater than or equal 1 seconds and less than 2 seconds              |
++----------------------------+------------------+----------------------------------------------------------------------+
+| calls_2_3s                 | bigint           | Number of times the statement was executed with duration             |
+|                            |                  | greater than or equal 2 seconds and less than 3 seconds              |
++----------------------------+------------------+----------------------------------------------------------------------+
+| calls_3_5s                 | bigint           | Number of times the statement was executed with duration             |
+|                            |                  | greater than or equal 3 seconds and less than 5 seconds              |
++----------------------------+------------------+----------------------------------------------------------------------+
+| calls_5_10s                | bigint           | Number of times the statement was executed with duration             |
+|                            |                  | greater than or equal 5 seconds and less than 10 seconds             |
++----------------------------+------------------+----------------------------------------------------------------------+
+| calls_10_20s               | bigint           | Number of times the statement was executed with duration             |
+|                            |                  | greater than or equal 10 seconds and less than 20 seconds            |
++----------------------------+------------------+----------------------------------------------------------------------+
+| calls_gt20s                | bigint           | Number of times the statement was executed with duration             |
+|                            |                  | greater than or equal 20 seconds                                     |
++----------------------------+------------------+----------------------------------------------------------------------+
+| plans                      | bigint           | Number of times the statement was planned (if                        |
+|                            |                  | ``pg_stat_counters.track_planning`` is enabled, otherwise zero)      |
+|                            |                  | Available from pg13.                                                 |
++----------------------------+------------------+----------------------------------------------------------------------+
+| total_plan_time            | double precision | Total time spent planning the statement, in milliseconds (if         |
+|                            |                  | ``pg_stat_counters.track_planning`` is enabled, otherwise zero).     |
+|                            |                  | Available from pg13                                                  |
++----------------------------+------------------+----------------------------------------------------------------------+
+| calls                      | bigint           | Number of times the statement was executed                           |
++----------------------------+------------------+----------------------------------------------------------------------+
+| total_exec_time            | double precision | Total time spent executing the statement, in milliseconds            |
++----------------------------+------------------+----------------------------------------------------------------------+
+| rows                       | bigint           | Total number of rows retrieved or affected by the statement          | 
++----------------------------+------------------+----------------------------------------------------------------------+
+| shared_blks_hit            | bigint           | Total number of shared block cache hits by the statement             |
++----------------------------+------------------+----------------------------------------------------------------------+
+| shared_blks_read           | bigint           | Total number of shared blocks read by the statement                  |
++----------------------------+------------------+----------------------------------------------------------------------+
+| shared_blks_dirtied        | bigint           | Total number of shared blocks dirtied by the statement               |
++----------------------------+------------------+----------------------------------------------------------------------+
+| shared_blks_written        | bigint           | Total number of shared blocks written by the statement               |
++----------------------------+------------------+----------------------------------------------------------------------+
+| local_blks_hit             | bigint           | Total number of local block cache hits by the statement              |
++----------------------------+------------------+----------------------------------------------------------------------+
+| local_blks_read            | bigint           | Total number of local blocks read by the statement                   |
++----------------------------+------------------+----------------------------------------------------------------------+
+| local_blks_dirtied         | bigint           | Total number of local blocks dirtied by the statement                |
++----------------------------+------------------+----------------------------------------------------------------------+
+| local_blks_written         | bigint           | Total number of local blocks written by the statement                |
++----------------------------+------------------+----------------------------------------------------------------------+
+| temp_blks_read             | bigint           | Total number of temp blocks read by the statement                    |
++----------------------------+------------------+----------------------------------------------------------------------+
+| temp_blks_written          | bigint           | Total number of temp blocks written by the statement                 |
++----------------------------+------------------+----------------------------------------------------------------------+
+| shared_blk_read_time       | double precision | Total time the statement spent reading shared blocks, in             |
+|                            |                  | milliseconds (if ``track_io_timing`` is enabled, otherwise zero).    |
+|                            |                  | Before pg17 this field represents total time the statement spent     |
+|                            |                  | by operators reading blocks (``blk_read_time``).                     |
++----------------------------+------------------+----------------------------------------------------------------------+
+| shared_blk_write_time      | double precision | Total time the statement spent writing shared blocks, in             |
+|                            |                  | milliseconds (if ``track_io_timing`` is enabled, otherwise zero).    |
+|                            |                  | Before pg17 this field represents total time the statement spent     |
+|                            |                  | by operators writing blocks (``blk_write_time``).                    |
++----------------------------+------------------+----------------------------------------------------------------------+
+| local_blk_read_time        | double precision | Total time the statement spent reading local blocks, in              |
+|                            |                  | milliseconds (if ``track_io_timing`` is enabled, otherwise zero).    |
+|                            |                  | Available from pg17.                                                 |
++----------------------------+------------------+----------------------------------------------------------------------+
+| local_blk_write_time       | double precision | Total time the statement spent writing local blocks, in              |
+|                            |                  | milliseconds (if track_io_timing is enabled, otherwise zero).        |
+|                            |                  | Available from pg17.                                                 |
++----------------------------+------------------+----------------------------------------------------------------------+
+| temp_blk_read_time         | double precision | Total time the statement spent reading temporary file blocks, in     |
+|                            |                  | milliseconds (if ``track_io_timing`` is enabled, otherwise zero).    |
+|                            |                  | Available from pg15.                                                 |
++----------------------------+------------------+----------------------------------------------------------------------+
+| temp_blk_write_time        | double precision | Total time the statement spent writing temporary file blocks, in     |
+|                            |                  | milliseconds (if ``track_io_timing`` is enabled, otherwise zero).    |
+|                            |                  | Available from pg15.                                                 |
++----------------------------+------------------+----------------------------------------------------------------------+
+| wal_records                | bigint           | Total number of WAL records generated by statements.                 |
+|                            |                  | Available from pg13                                                  |
++----------------------------+------------------+----------------------------------------------------------------------+
+| wal_fpi                    | bigint           | Total number of WAL full page images generated by statements.        |
+|                            |                  | Available from pg13                                                  |
++----------------------------+------------------+----------------------------------------------------------------------+
+| wal_bytes                  | numeric          | Total amount of WAL generated by statements in bytes.                |
+|                            |                  | Available from pg13                                                  |
++----------------------------+------------------+----------------------------------------------------------------------+
+| wal_buffers_full           | bigint           | Number of times the WAL buffers became full. Available from pg18.    |
++----------------------------+------------------+----------------------------------------------------------------------+
+| jit_functions              | bigint           | Total number of functions JIT-compiled by the statement.             |
+|                            |                  | Available from pg15                                                  |
++----------------------------+------------------+----------------------------------------------------------------------+
+| jit_generation_time        | double precision | Total time spent by the statement on generating JIT code, in         |
+|                            |                  | milliseconds. Available from pg15                                    |
++----------------------------+------------------+----------------------------------------------------------------------+
+| jit_inlining_count         | bigint           | Number of times functions have been inlined. Available from pg15.    |
++----------------------------+------------------+----------------------------------------------------------------------+
+| jit_inlining_time          | double precision | Total time spent by the statement on inlining functions, in          |
+|                            |                  | milliseconds. Available from pg15.                                   |
++----------------------------+------------------+----------------------------------------------------------------------+
+| jit_optimization_count     | bigint           | Number of times the statement has been optimized.                    |
+|                            |                  | Available from pg15.                                                 |
++----------------------------+------------------+----------------------------------------------------------------------+
+| jit_optimization_time      | double precision | Total time spent by the statement on optimizing, in milliseconds.    |
+|                            |                  | Available from pg15.                                                 |
++----------------------------+------------------+----------------------------------------------------------------------+
+| jit_emission_count         | bigint           | Number of times code has been emitted. Available from pg15.          |
++----------------------------+------------------+----------------------------------------------------------------------+
+| jit_emission_time          | double precision | Total time spent by the statement on emitting code, in               |
+|                            |                  | milliseconds. Available from pg15                                    |
++----------------------------+------------------+----------------------------------------------------------------------+
+| jit_deform_count           | bigint           | Total number of tuple deform functions JIT-compiled by the           |
+|                            |                  | statement. Available from pg17                                       |
++----------------------------+------------------+----------------------------------------------------------------------+
+| jit_deform_time            | double precision | Total time spent by the statement on JIT-compiling tuple deform      |
+|                            |                  | functions, in milliseconds. Available from pg17.                     |
++----------------------------+------------------+----------------------------------------------------------------------+
+| parallel_workers_to_launch | bigint           | Number of parallel workers planned to be launched.                   |
+|                            |                  | Available from pg18                                                  |
++----------------------------+------------------+----------------------------------------------------------------------+
+| parallel_workers_launched  | bigint           | Number of parallel workers actually launched. Available from pg18.   |
++----------------------------+------------------+----------------------------------------------------------------------+
+| cpu_user_time              | double precision | User CPU time used executing statements, in milliseconds             |
++----------------------------+------------------+----------------------------------------------------------------------+
+| cpu_sys_time               | double precision | System CPU time used executing statements, in milliseconds           |
++----------------------------+------------------+----------------------------------------------------------------------+
+| minflts                    | bigint           | Number of page reclaims (soft page faults) executing statements      |
++----------------------------+------------------+----------------------------------------------------------------------+
+| majflts                    | bigint           | Number of page faults (hard page faults) executing statements        |
++----------------------------+------------------+----------------------------------------------------------------------+
+| nswaps                     | bigint           | Number of swaps executing statements                                 |
++----------------------------+------------------+----------------------------------------------------------------------+
+| reads                      | bigint           | Number of bytes read by the filesystem layer executing statements    |
++----------------------------+------------------+----------------------------------------------------------------------+
+| writes                     | bigint           | Number of bytes written by the filesystem layer executing statements |
++----------------------------+------------------+----------------------------------------------------------------------+
+| msgsnds                    | bigint           | Number of IPC messages sent executing statements                     |
++----------------------------+------------------+----------------------------------------------------------------------+
+| msgrcvs                    | bigint           | Number of IPC messages received executing statements                 |
++----------------------------+------------------+----------------------------------------------------------------------+
+| nsignals                   | bigint           | Number of signals received executing statements                      |
++----------------------------+------------------+----------------------------------------------------------------------+
+| nvcsws                     | bigint           | Number of voluntary context switches executing statements            |
++----------------------------+------------------+----------------------------------------------------------------------+
+| nivcsws                    | bigint           | Number of involuntary context switches executing statements          |
++----------------------------+------------------+----------------------------------------------------------------------+
 
-Note: Statistics on WAL is available for version 13 and above
 
 dba_stat_counters view
 ~~~~~~~~~~~~~~~~~~~~~~

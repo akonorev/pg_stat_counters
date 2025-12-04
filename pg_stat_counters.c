@@ -93,8 +93,6 @@ static const uint32 PGSC_PG_MAJOR_VERSION = PG_VERSION_NUM / 100;
 
 typedef enum pgscStoreKind
 {
-        PGSC_INVALID = -1,
-
         /*
          * PGSC_PLAN and PGSC_EXEC must be respectively 0 and 1 as they're used to
          * reference the underlying values in the arrays in the Counters struct,
@@ -293,7 +291,6 @@ static shmem_request_hook_type prev_shmem_request_hook = NULL;
 #endif
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 #if PG_VERSION_NUM >= 130000
-static post_parse_analyze_hook_type prev_post_parse_analyze_hook = NULL;
 static planner_hook_type prev_planner_hook = NULL;
 #endif
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;
@@ -379,6 +376,7 @@ PG_FUNCTION_INFO_V1(pg_stat_counters);
 PG_FUNCTION_INFO_V1(pg_stat_counters_all);
 PG_FUNCTION_INFO_V1(pg_stat_counters_info);
 PG_FUNCTION_INFO_V1(get_cmd_name);
+PG_FUNCTION_INFO_V1(_fullversion);
 
 #if PG_VERSION_NUM >= 150000
 static void pgsc_shmem_request(void);
@@ -386,9 +384,6 @@ static void pgsc_shmem_request(void);
 static void pgsc_shmem_startup(void);
 static void pgsc_shmem_shutdown(int code, Datum arg);
 #if PG_VERSION_NUM >= 140000
-static void pgsc_post_parse_analyze(ParseState *pstate,
-		                    Query *query,
-                                    JumbleState *jstate);
 static PlannedStmt *pgsc_planner(Query *parse,
                                  const char *query_string,
                                  int cursorOptions,
@@ -585,8 +580,6 @@ void _PG_init(void)
 	prev_shmem_startup_hook = shmem_startup_hook;
 	shmem_startup_hook = pgsc_shmem_startup;
 #if PG_VERSION_NUM >= 140000
-        prev_post_parse_analyze_hook = post_parse_analyze_hook;
-        post_parse_analyze_hook = pgsc_post_parse_analyze;
         prev_planner_hook = planner_hook;
         planner_hook = pgsc_planner;
 #endif
@@ -938,60 +931,6 @@ pgsc_ExecutorStart(QueryDesc *queryDesc, int eflags)
 #if (PG_VERSION_NUM >= 140000)
 
 /*
- * Post-parse-analysis hook: mark query with a queryId
- */
-static void
-pgsc_post_parse_analyze(ParseState *pstate, Query *query, JumbleState *jstate)
-{
-        if (prev_post_parse_analyze_hook)
-                prev_post_parse_analyze_hook(pstate, query, jstate);
-
-        /* Safety check... */
-        if (!pgsc || !pgsc_hash || !pgsc_enabled(nesting_level))
-                return;
-
-        /*
-         * If it's EXECUTE, clear the queryId so that stats will accumulate for
-         * the underlying PREPARE.  But don't do this if we're not tracking
-         * utility statements, to avoid messing up another extension that might be
-         * tracking them.
-         */
-        if (query->utilityStmt)
-        {
-                if (pgsc_track_utility && IsA(query->utilityStmt, ExecuteStmt))
-                {
-                        query->queryId = UINT64CONST(0);
-                        return;
-                }
-        }
-
-        /*
-         * If query jumbling were able to identify any ignorable constants, we
-         * immediately create a hash table entry for the query, so that we can
-         * record the normalized form of the query string.  If there were no such
-         * constants, the normalized string would be the same as the query text
-         * anyway, so there's no need for an early entry.
-         */
-        if (jstate && jstate->clocations_count > 0)
-                pgsc_store(query->commandType
-                           , PGSC_INVALID
-                           , 0
-                           , 0
-                           , NULL       /* sys_info */
-                           , NULL
-                           , NULL
-#if (PG_VERSION_NUM >= 150000)
-                           , NULL
-#endif
-#if (PG_VERSION_NUM >= 180000)
-                           , 0
-                           , 0
-#endif
-			  );
-}
-
-
-/*
  * Planner hook: forward to regular planner, but measure planning time
  * if needed.
  */
@@ -1098,7 +1037,7 @@ pgsc_planner(Query *parse,
 
         return result;
 }
-#endif
+#endif	/* >= 140000 */
 
 
 /*
@@ -1880,6 +1819,7 @@ pgsc_store(CmdType operation
 		entry = entry_alloc(&key);
 	}
 
+	if (kind == PGSC_PLAN || kind == PGSC_EXEC)
 	{
 		volatile aggEntry *a = (volatile aggEntry *)pgsc_aggs;
 
@@ -1928,7 +1868,6 @@ pgsc_store(CmdType operation
                                      , parallel_workers_to_launch
                                      , parallel_workers_launched
 #endif
-
 		                    );
 		SpinLockRelease(&a->mutex);
 	}
@@ -2439,5 +2378,16 @@ get_cmd_name(PG_FUNCTION_ARGS)
 
 
 	PG_RETURN_TEXT_P(cstring_to_text(cmd_name[cmdid]));
+}
+
+
+/* Return the full version of extension, The full version consists 
+ * of the version in the .control file and the git short commit id.
+ * For developers usage.
+ */
+Datum
+_fullversion(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_TEXT_P(cstring_to_text(_EXTFULLVERSION));
 }
 

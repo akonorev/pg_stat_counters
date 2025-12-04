@@ -1,4 +1,9 @@
 
+1.2 (2025-12-01)
+
+    - Fix some errors.
+    - Add the _fullversion() function for internal purposes.
+
 1.1 (2025-05-31)
 
   Miscellaneous:
